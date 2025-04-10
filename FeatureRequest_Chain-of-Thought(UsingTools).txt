@@ -1,0 +1,269 @@
+Revised Proposal Sections:
+
+Let's modify the relevant parts of your FeatureRequest_Chain-of-Thought.md:
+
+1. Gathering Codebase Context (Defining Tools)
+This section remains similar, but we frame the functions as potential tools.
+
+Option A (Simpler Tools):
+getActiveEditorContext(): A tool that retrieves the content of the currently active editor or selection.
+(No workspace indexing initially)
+Option B (More Advanced Tools):
+getActiveEditorContext(): As above.
+findRelevantContext(query): A tool that performs a keyword (or vector) search across an indexed workspace representation (workspaceCodeContext) based on a search query provided by the LLM. Requires implementing getAllCodeFiles and maintaining workspaceCodeContext as described previously.
+Tool Descriptions (Example):
+
+We need to define these tools in a format the Cerebras API understands (referencing their docs for the exact structure, likely JSON schema).
+
+json
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "getActiveEditorContext",
+      "description": "Gets the content of the currently active file editor or the user's text selection within the editor. Call this if the user's question seems to refer implicitly or explicitly to the code they are currently looking at.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "findRelevantContext",
+      "description": "Searches the indexed codebase for files or snippets relevant to a specific query string. Use this if the user's question requires searching across multiple files or the broader project context.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The specific keywords or question to search for in the codebase."
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  }
+  // Add more tools if needed
+]
+(Self-correction: Initially, I thought getAllCodeFiles could be a tool, but that's too broad and resource-intensive for the LLM to call directly. It's better as a user-triggered action or background process that populates the data used by findRelevantContext.)
+
+2. Retrieving Relevant Context (Executing Tools)
+This section changes significantly. The findRelevantContext function (and getActiveEditorContext) are no longer called before the first API request. Instead, they are executed if and when the LLM requests them via a tool call response.
+
+The extension's main logic needs a loop to handle potential tool calls:
+
+javascript
+// Simplified interaction loop
+async function handleUserQuery(userQuestion, conversationHistory, context /*, other params */) {
+    let currentHistory = [...conversationHistory]; // Copy history for this turn
+    currentHistory.push({ role: 'user', content: userQuestion });
+
+    let maxTurns = 5; // Safety break for tool call loops
+    let turn = 0;
+
+    while (turn < maxTurns) {
+        turn++;
+
+        // 1. Prepare the prompt including tool descriptions and current history
+        const toolDescriptions = getToolDescriptions(); // Load the JSON descriptions
+        const prompt = preparePromptForApiWithTools(currentHistory, toolDescriptions);
+
+        // 2. Call the Cerebras API
+        const response = await makeCerebrasApiCall(prompt, context.globalState.get('wscode.apiKey'), /* selectedModel */);
+        const responseContent = response.choices[0].message.content; // Adjust based on actual API response structure
+        const toolCalls = response.choices[0].message.tool_calls; // Check for tool calls
+
+        if (!toolCalls || toolCalls.length === 0) {
+            // No tool calls, LLM provided the final answer
+            console.log("[Cerebras] Received final answer.");
+            currentHistory.push({ role: 'assistant', content: responseContent });
+            // Update UI, save final history, etc.
+            await saveHistory(context, currentHistory); // Save the full turn history
+            displayAnswerInWebview(responseContent);
+            return; // Exit the loop
+        }
+
+        // 3. Handle Tool Calls
+        console.log(`[Cerebras] Received tool call request:`, toolCalls);
+        // Add the assistant's request message to history
+        currentHistory.push({ role: 'assistant', content: null, tool_calls: toolCalls });
+
+        for (const toolCall of toolCalls) {
+            const functionName = toolCall.function.name;
+            const functionArgs = JSON.parse(toolCall.function.arguments); // Arguments are often JSON strings
+            let functionResultContent;
+
+            try {
+                if (functionName === 'getActiveEditorContext') {
+                    functionResultContent = getActiveEditorContent(); // Your existing function
+                } else if (functionName === 'findRelevantContext') {
+                    // Ensure workspaceCodeContext is loaded if using indexing
+                    const workspaceCodeContext = context.workspaceState.get('wscode.workspaceCodeContext') || {};
+                    if (Object.keys(workspaceCodeContext).length === 0 && !functionArgs.query) {
+                         functionResultContent = "Workspace has not been indexed yet. Cannot search.";
+                    } else if (!functionArgs.query) {
+                         functionResultContent = "Error: Search query parameter is missing.";
+                    }
+                     else {
+                        functionResultContent = findRelevantContext(functionArgs.query, workspaceCodeContext);
+                    }
+                } else {
+                    console.warn(`[Cerebras] Unknown tool called: ${functionName}`);
+                    functionResultContent = `Error: Tool '${functionName}' not found.`;
+                }
+            } catch (error) {
+                 console.error(`[Cerebras] Error executing tool ${functionName}:`, error);
+                 functionResultContent = `Error executing tool ${functionName}: ${error.message}`;
+            }
+
+
+            // Add the tool result message to history for the next API call
+            currentHistory.push({
+                role: 'tool',
+                tool_call_id: toolCall.id, // Important to link result to the call
+                content: functionResultContent
+            });
+        }
+        // Loop back to call the API again with the tool results included in the history
+    }
+
+    // If loop finishes without returning, something went wrong (e.g., too many tool calls)
+    console.error("[Cerebras] Max tool call turns exceeded.");
+    displayErrorInWebview("Assistant got stuck in a loop trying to use tools. Please try rephrasing your question.");
+    // Save the partial history for debugging?
+    await saveHistory(context, currentHistory);
+}
+
+// Placeholder for getting active editor content
+function getActiveEditorContent() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        return "No active text editor found.";
+    }
+    const selection = editor.selection;
+    const text = selection.isEmpty ? editor.document.getText() : editor.document.getText(selection);
+    // Add truncation if necessary
+    const MAX_EDITOR_CONTEXT = 4000;
+    return text.length > MAX_EDITOR_CONTEXT ? text.substring(0, MAX_EDITOR_CONTEXT) + "\n... (truncated)" : text;
+}
+
+// findRelevantContext function remains as previously defined
+// getAllCodeFiles function remains as previously defined (if using indexing)
+Use code with care. Learn more
+3. Modifying the Prompt for Tool Use
+The prompt preparation function needs to change to include the tool descriptions and guide the model on how to use them. The explicit "Think step-by-step" can still be beneficial.
+
+javascript
+// Updated prompt preparation function
+function preparePromptForApiWithTools(conversationHistory, toolDescriptions) {
+    // System Prompt instructing tool use
+    let systemPrompt = `You are a helpful AI assistant integrated into VS Code.
+Think step-by-step to answer the user's question accurately.
+You have access to the following tools to gather information about the user's code environment if needed.
+Only call tools if necessary to answer the user's question. If you have enough information, provide the final answer directly.
+When providing the final answer, do not explicitly mention the tools you used unless it's relevant to the explanation.`;
+
+    // Format history (User, Assistant, Tool messages)
+    const formattedHistory = conversationHistory.map(item => {
+        if (item.role === 'tool') {
+            return `Tool Result (for call ${item.tool_call_id}):\n${item.content}`;
+        } else if (item.role === 'assistant' && item.tool_calls) {
+            // Represent the assistant's decision to call tools
+            const calls = item.tool_calls.map(tc => `Call ${tc.function.name} with args ${tc.function.arguments}`).join(', ');
+            return `Assistant decided to call tools: [${calls}]`;
+        } else {
+             return `${item.role}: ${item.content}`;
+        }
+    }).join('\n\n');
+
+
+    // Construct the final structure expected by the API (this might vary)
+    // Often involves a system message, and then the history array.
+    // The API call itself might take the tools array separately.
+    // CONSULT CEREBRAS DOCS for the exact request format.
+
+    // Example placeholder structure:
+    let fullPrompt = `${systemPrompt}\n\nConversation History:\n${formattedHistory}\n\nAssistant Thinking:`;
+
+    // --- Context Length Management ---
+    // CRITICAL: Ensure the combined history and prompts don't exceed limits.
+    // This is more complex now with potential tool results adding to the history.
+    // Implement robust truncation, potentially removing older history or tool results first.
+    const MAX_PROMPT_LENGTH = 8000; // Example limit
+    if (fullPrompt.length > MAX_PROMPT_LENGTH) {
+        console.warn('[Cerebras] Prompt exceeds max length, attempting truncation...');
+        // Add intelligent truncation logic here
+        fullPrompt = truncatePrompt(fullPrompt, MAX_PROMPT_LENGTH); // Implement truncatePrompt
+    }
+
+    // The actual object sent to the API might look different, e.g.:
+    // return {
+    //     model: "...",
+    //     messages: [ {role: "system", content: systemPrompt}, ...conversationHistory ],
+    //     tools: toolDescriptions,
+    //     tool_choice: "auto" // Let the model decide
+    // }
+    // Return the structure needed by makeCerebrasApiCall
+    return fullPrompt; // Or the structured object
+}
+4. Managing State ("Context Provider")
+This remains largely the same. workspaceState is still used for history. If using workspace indexing (Option B for tools), workspaceState could also store the workspaceCodeContext index data, which the findRelevantContext tool function would access.
+
+javascript
+// In activate(context)
+const historyStorageKey = `cerebrasChatHistory_${vscode.workspace.name || 'global'}`;
+const workspaceIndexKey = `wscode.workspaceCodeContext`; // Key for indexed data
+
+// Load history on activation
+let conversationHistory = context.workspaceState.get(historyStorageKey) || [];
+
+// Load index if it exists (needed for findRelevantContext tool)
+// let workspaceCodeContext = context.workspaceState.get(workspaceIndexKey) || {};
+
+// Save history (potentially after multiple turns if tools were used)
+async function saveHistory(context, history) {
+    // Add history length limiting logic here
+    const MAX_HISTORY_ITEMS = 20; // Limit user/assistant turns + tool calls/results
+     if (history.length > MAX_HISTORY_ITEMS) {
+         history = history.slice(-MAX_HISTORY_ITEMS);
+     }
+    await context.workspaceState.update(historyStorageKey, history);
+}
+
+// Command to trigger indexing (if using Option B)
+vscode.commands.registerCommand('wscode.indexWorkspace', async () => {
+    vscode.window.showInformationMessage('Indexing workspace...');
+    const workspaceCodeContext = await getAllCodeFiles(); // Function defined earlier
+    await context.workspaceState.update(workspaceIndexKey, workspaceCodeContext); // Save the index
+    vscode.window.showInformationMessage(`Workspace indexing complete. Found ${Object.keys(workspaceCodeContext).length} files.`);
+});
+
+Summary of Changes (Tool Use Adaptation):
+Define Tools: Identify functions like getActiveEditorContext and findRelevantContext as tools. Create JSON descriptions for them according to Cerebras API specs.
+Modify Interaction Flow: Implement a loop in the main request handler (handleUserQuery) to:
+Send the user query + history + tool descriptions to the API.
+Check the response for tool call requests.
+If tools are called: Execute the corresponding local functions, get the results.
+Add the tool results back into the conversation history.
+Call the API again with the updated history.
+Repeat until the API returns a final answer without tool calls.
+Update Prompting: Change preparePromptForApi to include tool descriptions and instruct the model on how/when to use them. Ensure the history formatting correctly includes tool calls and results. Crucially, implement robust context length management.
+Tool Execution Logic: Write the code to parse tool call requests from the API, map them to your local functions (like findRelevantContext), execute them, and handle potential errors.
+State Management: Use workspaceState for history. If using workspace indexing, also use workspaceState to store the index data accessed by the findRelevantContext tool. Add a command to trigger indexing.
+Overall Thoughts:
+
+This is a powerful approach!
+
+Pros:
+Gives the LLM more agency to request specific information only when needed, potentially leading to more relevant context use.
+Can handle more complex queries that require information from multiple sources (editor + workspace search).
+Aligns with modern LLM interaction patterns.
+Cons:
+Increased Complexity: The interaction logic becomes significantly more complex due to the multi-turn request/response/tool-execution loop. Error handling is more involved.
+Latency: Each tool call adds at least one extra round trip to the API, increasing the time to get the final answer.
+Context Window Management: Managing the context window becomes harder as tool calls and results add to the conversation history length. Careful truncation strategies are essential.
+API Costs: More API calls might mean higher costs, depending on the pricing model.
+Recommendation: This is a worthwhile evolution of the feature. Start by implementing tool use with just the getActiveEditorContext tool, as it's simpler and doesn't require indexing. Once that works, you can add the findRelevantContext tool and the associated workspace indexing mechanism if the added complexity is justified by the feature requirements. Remember to consult the Cerebras Tool Use documentation carefully for the exact API request/response formats.
