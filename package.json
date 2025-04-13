@@ -2,7 +2,7 @@
   "name": "wscode",
   "displayName": "WSCode - Instant Inference",
   "description": "Unofficial extension that enables you to chat with Cerebras Inference directly within VSCode",
-  "version": "0.9.8",
+  "version": "0.10.0",
   "publisher": "sairyuichi",
   "repository": "https://github.com/ryuichis/vscode-extension-wscode",
   "engines": {
@@ -25,6 +25,14 @@
       {
         "command": "wscode.setupApiKey",
         "title": "WSCode: Setup API Key for Cerebras Inference"
+      },
+      {
+        "command": "wscode.indexWorkspace",
+        "title": "WSCode: Index Workspace for Context"
+      },
+      {
+        "command": "wscode.clearWorkspaceIndex",
+        "title": "WSCode: Clear Workspace Index"
       }
     ],
     "configuration": {
@@ -36,6 +44,26 @@
           "default": "",
           "scope": "machine",
           "description": "API Key for Cerebras Inference"
+        },
+        "wscode.maxIndexedFiles": {
+          "type": "number",
+          "default": 1000,
+          "description": "Maximum number of files to index in the workspace"
+        },
+        "wscode.fileExtensionsToIndex": {
+          "type": "string",
+          "default": "**/*.{js,ts,py,java,md,html,css,json,c,cpp,h,hpp,cs,go,rs,php,rb,swift,kt,scala}",
+          "description": "File patterns to include in workspace indexing (glob pattern)"
+        },
+        "wscode.excludeFromIndex": {
+          "type": "string",
+          "default": "**/node_modules/**,**/dist/**,**/build/**,**/.git/**,**/venv/**,**/__pycache__/**",
+          "description": "Patterns to exclude from workspace indexing (comma-separated glob patterns)"
+        },
+        "wscode.maxContextLength": {
+          "type": "number",
+          "default": 8000,
+          "description": "Maximum length of context to send to Cerebras API"
         }
       }
     },
@@ -51,6 +79,7 @@
     "views": {
       "wscodeView": [
         {
+          "icon": "resources/wscode-view-icn.png",
           "type": "webview",
           "id": "cerebrasInferenceView",
           "name": "Cerebras Inference"
@@ -76,6 +105,7 @@
   },
   "dependencies": {
     "@cerebras/cerebras_cloud_sdk": "^1.15.0",
+    "hnswlib-node": "^1.4.2",
     "marked": "^15.0.4"
   }
 }

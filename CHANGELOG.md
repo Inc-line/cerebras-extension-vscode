@@ -1,5 +1,13 @@
 # Change Log
 
+## 0.10.0
+
+- Added Chain-of-Thought reasoning for more accurate responses
+- Implemented workspace indexing using hnswlib-node for codebase-aware context
+- Added tool-based interaction with Cerebras API for more intelligent context retrieval
+- Added new commands for workspace indexing management
+- Added new configuration options for controlling indexing behavior
+
 ## 0.9.8
 
 - Automatically retry without editor context for context_length_exceeded error
